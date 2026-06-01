@@ -9,10 +9,11 @@ A GCP Cloud Function that triggers automatically after each Gong sales call, pro
 3. **Quality-gates** short/garbled transcripts — creates a manual-review Salesforce task instead of calling Claude
 4. **Redacts PII** (credit cards, SSNs, phone numbers) before sending anything to Claude
 5. **Calls Claude** to extract a structured JSON payload: call summary, next steps, technical questions, deal stage signal, and CRM notes
-6. **Writes to Salesforce** — patches the Opportunity with notes and next steps
-7. **Creates a Gmail draft** in the AE's mailbox — one click to review and send
+6. **Logs every Claude call** to BigQuery (`claude_logs.claude_calls`) — model, prompts, token counts, latency, success/failure, parse errors, and deal stage signal
+7. **Writes to Salesforce** — patches the Opportunity with notes and next steps
+8. **Creates a Gmail draft** in the AE's mailbox — one click to review and send
 
-Salesforce and Gmail writes are independent; a failure in one doesn't block the other.
+Salesforce and Gmail writes are independent; a failure in one doesn't block the other. BigQuery logging is also non-fatal — a BQ failure is logged as an error but never interrupts the main write path.
 
 ---
 
@@ -21,12 +22,14 @@ Salesforce and Gmail writes are independent; a failure in one doesn't block the 
 ```
 anrok_code/
 ├── main.py              # Cloud Function entrypoint
+├── bq_logger.py         # BigQuery logger for Claude call observability
 ├── gong.py              # Gong API client
 ├── salesforce.py        # Salesforce REST client
 ├── gmail.py             # Gmail API client (domain-wide delegation)
 ├── test_main.py         # Unit tests (no real API keys needed)
 ├── run_local.py         # Local smoke test (uses real Claude, mocks everything else)
 ├── requirements.txt
+├── .gcloudignore        # Excludes .git and node_modules from Cloud deployments
 └── README.md
 ```
 
@@ -59,6 +62,8 @@ python run_local.py
 ```
 
 The mock flags (`GONG_MOCK`, `SALESFORCE_MOCK`, `GMAIL_MOCK`) are set automatically by `run_local.py` — no secrets needed for those services locally.
+
+`run_local.py` sets `GCP_PROJECT_ID=""` so Secret Manager is skipped, but sets `BQ_PROJECT_ID=anrok-498119` so **BigQuery logging still writes real rows** in local runs. To disable BQ writes locally, set `BQ_MOCK=true` before running.
 
 **Sample output:**
 
@@ -121,10 +126,13 @@ In production, all secrets live in **GCP Secret Manager**. Locally, the function
 
 ### Prerequisites
 
-- GCP project with APIs enabled: Cloud Functions, Pub/Sub, Secret Manager
+- GCP project with APIs enabled: Cloud Functions, Pub/Sub, Secret Manager, BigQuery
 - Service account `gtm-processor-sa` with roles:
   - `secretmanager.secretAccessor`
   - `pubsub.subscriber`
+  - `bigquery.dataEditor` on the `claude_logs` dataset (or `roles/bigquery.dataEditor` project-wide)
+
+BigQuery table must be created once before first deploy (DDL in `bq_logger.py` docstring).
 
 ### Deploy
 
@@ -170,8 +178,11 @@ Credit card numbers, SSNs, and phone numbers are regex-masked before the transcr
 **Fallback on malformed JSON**
 If Claude returns non-JSON, the raw output is truncated and written to Salesforce as a plain-text note flagged for cleanup. The function doesn't crash — it degrades gracefully.
 
+**BigQuery logging on every Claude call path**
+All three exit paths from `call_claude()` — success, JSON parse failure, and retry exhaustion — write a row to BigQuery. Token counts, latency, prompts, and the raw response are all captured. BQ failures are non-fatal: logged as errors, never raised. This gives full observability for prompt iteration without adding risk to the core write path.
+
 **Mock mode skips secret fetches**
-When `*_MOCK` env vars are set, the function skips calling Secret Manager for those clients entirely — no dummy secrets needed for local development.
+When `*_MOCK` env vars are set, the function skips calling Secret Manager for those clients entirely — no dummy secrets needed for local development. `BQ_MOCK=true` similarly disables BQ writes (useful in CI/tests).
 
 ---
 
@@ -179,4 +190,3 @@ When `*_MOCK` env vars are set, the function skips calling Secret Manager for th
 
 - **Slack notification** to AE after Gmail draft is created (the "one click to send" UX in the design doc)
 - **Solutions team Slack alert** when `requires_solutions_flag` is true
-- **BigQuery logging** of every Claude call for prompt iteration and quality review
