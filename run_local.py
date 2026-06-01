@@ -23,8 +23,10 @@ os.environ["GONG_MOCK"] = "true"
 os.environ["SALESFORCE_MOCK"] = "true"
 os.environ["GMAIL_MOCK"] = "true"
 
-# Patch Secret Manager so it falls back to env vars
+# Blank GCP_PROJECT_ID so get_secret() falls back to env vars (skips Secret Manager).
+# BQ_PROJECT_ID is set separately so BQ logging still writes to the real table.
 os.environ["GCP_PROJECT_ID"] = ""
+os.environ["BQ_PROJECT_ID"] = "anrok-498119"
 
 if not os.environ.get("ANTHROPIC_API_KEY"):
     print("ERROR: Set ANTHROPIC_API_KEY before running.")

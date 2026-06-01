@@ -18,11 +18,12 @@ import anthropic
 import functions_framework
 from google.cloud import secretmanager
 
+from bq_logger import log_claude_call
 from gong import GongClient
 from salesforce import SalesforceClient
 from gmail import GmailClient
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -108,12 +109,18 @@ Rules:
 """
 
 
-def call_claude(transcript: str, metadata: dict[str, Any]) -> dict[str, Any]:
+def call_claude(
+    transcript: str,
+    metadata: dict[str, Any],
+    call_id: str,
+    opportunity_id: str | None = None,
+) -> dict[str, Any]:
     """
     Send transcript + metadata to Claude and return parsed JSON.
 
     Retries on rate-limit errors with exponential backoff.
     Falls back gracefully if the response is not valid JSON.
+    Every attempt outcome is logged to BigQuery via bq_logger.
     """
     api_key = get_secret("ANTHROPIC_API_KEY")
     client = anthropic.Anthropic(api_key=api_key)
@@ -124,6 +131,8 @@ def call_claude(transcript: str, metadata: dict[str, Any]) -> dict[str, Any]:
     )
 
     last_error: Exception | None = None
+    t0 = time.monotonic()
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.messages.create(
@@ -133,7 +142,24 @@ def call_claude(transcript: str, metadata: dict[str, Any]) -> dict[str, Any]:
                 messages=[{"role": "user", "content": user_message}],
             )
             raw = response.content[0].text
-            return json.loads(raw)
+            parsed = json.loads(raw)
+            log_claude_call(
+                call_id=call_id,
+                opportunity_id=opportunity_id,
+                model=CLAUDE_MODEL,
+                system_prompt=SYSTEM_PROMPT,
+                user_message=user_message,
+                raw_response=raw,
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                success=True,
+                error_type=None,
+                deal_stage_signal=parsed.get("deal_stage_signal"),
+                parse_error=False,
+                attempt_count=attempt,
+            )
+            return parsed
 
         except anthropic.RateLimitError as exc:
             last_error = exc
@@ -142,9 +168,8 @@ def call_claude(transcript: str, metadata: dict[str, Any]) -> dict[str, Any]:
             time.sleep(wait)
 
         except json.JSONDecodeError:
-            # Malformed JSON — return a flagged fallback so Salesforce still gets a note
             logger.error("Claude returned non-JSON; using plain-text fallback")
-            return {
+            fallback = {
                 "summary": "PARSE_ERROR",
                 "next_steps": [],
                 "technical_questions": [],
@@ -152,11 +177,44 @@ def call_claude(transcript: str, metadata: dict[str, Any]) -> dict[str, Any]:
                 "salesforce_notes": f"[AUTO-FLAGGED FOR CLEANUP] Raw Claude output:\n{raw[:2000]}",
                 "requires_solutions_flag": False,
             }
+            log_claude_call(
+                call_id=call_id,
+                opportunity_id=opportunity_id,
+                model=CLAUDE_MODEL,
+                system_prompt=SYSTEM_PROMPT,
+                user_message=user_message,
+                raw_response=raw,
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                success=False,
+                error_type="JSONDecodeError",
+                deal_stage_signal="UNCLEAR",
+                parse_error=True,
+                attempt_count=attempt,
+            )
+            return fallback
 
         except anthropic.APIError as exc:
             last_error = exc
             logger.error("Claude API error on attempt %d: %s", attempt, exc)
 
+    log_claude_call(
+        call_id=call_id,
+        opportunity_id=opportunity_id,
+        model=CLAUDE_MODEL,
+        system_prompt=SYSTEM_PROMPT,
+        user_message=user_message,
+        raw_response=None,
+        input_tokens=None,
+        output_tokens=None,
+        latency_ms=int((time.monotonic() - t0) * 1000),
+        success=False,
+        error_type=type(last_error).__name__ if last_error else "Unknown",
+        deal_stage_signal=None,
+        parse_error=False,
+        attempt_count=MAX_RETRIES,
+    )
     raise RuntimeError(f"Claude API failed after {MAX_RETRIES} attempts: {last_error}")
 
 
@@ -231,7 +289,7 @@ def process_gong_call(cloud_event):  # noqa: ANN001
     }
 
     # 5. Call Claude
-    result = call_claude(transcript, metadata)
+    result = call_claude(transcript, metadata, call_id=call_id, opportunity_id=opportunity_id)
     logger.info("Claude result for call_id=%s: stage_signal=%s", call_id, result.get("deal_stage_signal"))
 
     # 6. Write to Salesforce (independent of Gmail)
