@@ -76,7 +76,7 @@ def redact_pii(text: str) -> str:
 # Claude integration
 # ---------------------------------------------------------------------------
 
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 CLAUDE_MAX_TOKENS = 1024
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 2.0  # seconds

@@ -46,9 +46,10 @@ pip install -r requirements.txt
 
 ### 2. Run the unit tests
 
-No API keys needed — all external calls are mocked.
+No API keys needed — all external calls are mocked. Make sure the venv is active first (step 1), otherwise Python won't find the installed packages.
 
 ```bash
+source venv/bin/activate
 pytest test_main.py -v
 ```
 

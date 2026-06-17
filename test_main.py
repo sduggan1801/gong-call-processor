@@ -118,7 +118,7 @@ class TestCallClaude:
         ]
 
         transcript = " ".join(["word"] * 100)
-        result = call_claude(transcript, {"company_name": "Acme Corp", "call_date": "2025-06-01"})
+        result = call_claude(transcript, {"company_name": "Acme Corp", "call_date": "2025-06-01"}, call_id="test-call-id")
 
         assert result["deal_stage_signal"] == "PROGRESSING"
         assert len(result["next_steps"]) == 2
@@ -131,7 +131,7 @@ class TestCallClaude:
             MagicMock(text="This is not JSON at all.")
         ]
 
-        result = call_claude(" ".join(["w"] * 100), {})
+        result = call_claude(" ".join(["w"] * 100), {}, call_id="test-call-id")
         assert result["deal_stage_signal"] == "UNCLEAR"
         assert "PARSE_ERROR" in result["summary"] or "FLAGGED" in result["salesforce_notes"]
 
@@ -149,6 +149,6 @@ class TestCallClaude:
             MagicMock(content=[MagicMock(text=json.dumps(MOCK_CLAUDE_RESPONSE))]),
         ]
 
-        result = call_claude(" ".join(["w"] * 100), {})
+        result = call_claude(" ".join(["w"] * 100), {}, call_id="test-call-id")
         assert mock_client.messages.create.call_count == 3
         assert result["deal_stage_signal"] == "PROGRESSING"
